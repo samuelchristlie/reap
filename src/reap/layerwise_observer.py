@@ -182,8 +182,12 @@ class LayerwiseMoEObserver:
         # Cache for replaying block inputs and forward kwargs between blocks
         self.replay_cache = ReplayCache()
 
-        # Track which block is currently loaded
-        self.currently_loaded_block_idx = -1
+        # Track which blocks are currently on GPU
+        self.loaded_block_indices: set[int] = set()
+
+        # Multi-block windowing settings
+        self.max_blocks_on_gpu: int = 1  # updated by _estimate_gpu_capacity()
+        self._gpu_capacity_estimated = False
 
         # Hooks for current block
         self.hooks = []
@@ -275,38 +279,96 @@ class LayerwiseMoEObserver:
 
         return safe_get_device(block)
 
+    def _estimate_gpu_capacity(self) -> None:
+        """Estimate how many blocks can fit on GPU simultaneously.
+
+        Uses a simple heuristic: move one block to GPU, measure its
+        memory footprint, and compute how many fit in available VRAM.
+        """
+        if not torch.cuda.is_available() or not self.blocks:
+            self.max_blocks_on_gpu = 1
+            self._gpu_capacity_estimated = True
+            return
+
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
+        baseline = torch.cuda.memory_allocated()
+
+        # Move one block to GPU to measure its size
+        test_block = self.blocks[0]
+        test_block.to("cuda")
+        torch.cuda.synchronize()
+        after_load = torch.cuda.memory_allocated()
+        block_bytes = after_load - baseline
+
+        # Move it back
+        test_block.to("cpu")
+        torch.cuda.empty_cache()
+        cleanup_memory(synchronize=True)
+
+        total_vram = torch.cuda.get_device_properties(0).total_mem
+        # Reserve 3 GB for activations, CUDA kernels, fragmentation
+        reserved = 3 * (1024 ** 3)
+        available = total_vram - reserved
+
+        if block_bytes > 0:
+            self.max_blocks_on_gpu = max(1, int(available // block_bytes))
+        else:
+            self.max_blocks_on_gpu = 1
+
+        logger.info(
+            "GPU capacity estimate: %.1f GB total, %.1f GB available, "
+            "%.0f MB/block → max %d blocks on GPU",
+            total_vram / 1e9, available / 1e9,
+            block_bytes / 1e6, self.max_blocks_on_gpu,
+        )
+        self._gpu_capacity_estimated = True
+
     def _load_block_for_replay(self, block_idx: int) -> str:
-        """Load the requested transformer block and unload the previous one."""
+        """Load the requested transformer block onto GPU.
+
+        Maintains a sliding window of up to ``max_blocks_on_gpu`` blocks
+        on GPU.  When the window is full, the oldest block is offloaded
+        to CPU before the new one is loaded.
+        """
+        if not self._gpu_capacity_estimated:
+            self._estimate_gpu_capacity()
+
         block = self._block_at(block_idx)
         if block is None:
             raise IndexError("Invalid block index: %s", block_idx)
 
-        if self.currently_loaded_block_idx == block_idx:
+        if block_idx in self.loaded_block_indices:
             return safe_get_device(block)
 
-        self._offload_current_block()
+        # Offload blocks until there is room
+        while len(self.loaded_block_indices) >= self.max_blocks_on_gpu:
+            oldest = min(self.loaded_block_indices)
+            self._offload_block(oldest)
 
         target_device = "cuda" if torch.cuda.is_available() else "cpu"
         final_device = self._move_block(block, block_idx, target_device)
 
-        self.currently_loaded_block_idx = block_idx
-        logger.debug("Loaded block %s", block_idx)
+        self.loaded_block_indices.add(block_idx)
+        logger.debug("Loaded block %s (%d/%d on GPU)",
+                      block_idx, len(self.loaded_block_indices),
+                      self.max_blocks_on_gpu)
         return final_device
 
-    def _offload_current_block(self) -> None:
-        """Offload the current block to CPU and release memory."""
-        block_idx = self.currently_loaded_block_idx
-        if block_idx < 0:
-            return
-
+    def _offload_block(self, block_idx: int) -> None:
+        """Offload a single block to CPU."""
         block = self._block_at(block_idx)
-
         try:
             if block is not None:
                 self._move_block(block, block_idx, "cpu")
         finally:
-            self.currently_loaded_block_idx = -1
-            cleanup_memory(synchronize=False)
+            self.loaded_block_indices.discard(block_idx)
+
+    def _offload_current_block(self) -> None:
+        """Offload all loaded blocks to CPU and release memory."""
+        for idx in list(self.loaded_block_indices):
+            self._offload_block(idx)
+        cleanup_memory(synchronize=False)
 
     def _capture_first_block_inputs(self, data_batches: List[torch.Tensor]):
         """
