@@ -53,7 +53,7 @@ from reap.model_util import (
     get_super_expert_indices,
     load_moe_model,
 )
-from reap.eval import run_evaluate
+# from reap.eval import run_evaluate  # deferred to avoid lm_eval dep at import time
 from reap.cluster_plots import plot_cluster_analysis
 from reap.metrics import get_distance_fn
 
@@ -830,6 +830,7 @@ def main():
         torch.cuda.empty_cache()
         gc.collect()
         model_args.model_name = merged_model_dir
+        from reap.eval import run_evaluate
         run_evaluate(model_args, merged_model_dir / "eval", eval_args, reap_args.seed)
 
 

@@ -27,7 +27,10 @@ import logging
 import torch
 from datasets import Dataset, DatasetDict, load_dataset
 from transformers import AutoTokenizer, BatchEncoding
-from vllm import TokensPrompt
+try:
+    from vllm import TokensPrompt
+except ImportError:
+    TokensPrompt = None  # type: ignore[assignment,misc]
 
 
 logger = logging.getLogger(__name__)

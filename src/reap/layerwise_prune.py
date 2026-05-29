@@ -48,7 +48,7 @@ from reap.model_util import patched_model_map, load_moe_model
 from reap.observer import OBSERVER_CONFIG_REGISTRY
 from reap.layerwise_observer import LayerwiseMoEObserver
 from reap.layerwise_model_utils import cleanup_memory
-from reap.eval import run_evaluate
+# from reap.eval import run_evaluate  # deferred to avoid lm_eval dep at import time
 from reap.prune import prune as prune_model
 from reap.prune import get_pruned_model_dir
 from reap.main import dump_args_to_yaml, create_results_directory

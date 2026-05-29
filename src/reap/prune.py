@@ -33,7 +33,7 @@ from reap.cluster import (
     dynamic_frequency_penalized_clustering,
 )
 from reap.model_util import get_moe, assert_merge, MODEL_ATTRS, patched_model_map, get_super_expert_indices, load_moe_model
-from reap.eval import run_evaluate
+# from reap.eval import run_evaluate  # deferred to avoid lm_eval dep at import time
 import shutil
 
 logger = logging.getLogger(__name__)
