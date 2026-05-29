@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from transformers import AutoTokenizer, AutoModelForCausalLM, HfArgumentParser
+from transformers import AutoTokenizer, HfArgumentParser
 
 from accelerate.utils import set_seed
 from accelerate.hooks import remove_hook_from_module
@@ -51,6 +51,7 @@ from reap.model_util import (
     MODEL_ATTRS,
     patched_model_map,
     get_super_expert_indices,
+    load_moe_model,
 )
 from reap.eval import run_evaluate
 from reap.cluster_plots import plot_cluster_analysis
@@ -660,7 +661,7 @@ def main():
     model_name = patched_model_map(model_args.model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     # load model
-    model = AutoModelForCausalLM.from_pretrained(
+    model = load_moe_model(
         model_name,
         device_map="auto",
         torch_dtype="auto",

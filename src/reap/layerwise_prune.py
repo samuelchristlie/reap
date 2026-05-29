@@ -29,7 +29,7 @@ from typing import Any, Dict, List
 import yaml
 
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, HfArgumentParser
+from transformers import AutoTokenizer, HfArgumentParser
 
 from accelerate.utils import set_seed
 
@@ -44,7 +44,7 @@ from reap.args import (
     LayerwiseArgs,
 )
 from reap.data import load_category_batches, parse_composite_dataset_spec
-from reap.model_util import patched_model_map
+from reap.model_util import patched_model_map, load_moe_model
 from reap.observer import OBSERVER_CONFIG_REGISTRY
 from reap.layerwise_observer import LayerwiseMoEObserver
 from reap.layerwise_model_utils import cleanup_memory
@@ -279,7 +279,7 @@ def main():
 
         # Load model on CPU for layerwise processing
         logger.info(f"Loading model {model_name} on CPU for layerwise processing...")
-        model = AutoModelForCausalLM.from_pretrained(
+        model = load_moe_model(
             model_name,
             device_map="cpu",
             torch_dtype="auto",
@@ -360,7 +360,7 @@ def main():
             del model
         cleanup_memory()
 
-        model = AutoModelForCausalLM.from_pretrained(
+        model = load_moe_model(
             model_name,
             device_map="auto",
             torch_dtype="auto",

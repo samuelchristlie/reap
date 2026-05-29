@@ -524,6 +524,16 @@ class Glm44MoEObserverHookConfig(MoETransformerObserverConfig):
     fused_experts: bool = False
 
 
+@dataclass
+class Qwen3_5MoEObserverHookConfig(MoETransformerObserverConfig):
+    module_class_name_to_hook_regex: Optional[str] = "Qwen3_5MoeSparseMoeBlock"
+    # num_experts and top_k live on submodules of the SparseMoeBlock:
+    #   module.experts.num_experts, module.gate.top_k
+    num_experts_attr_name: str = "experts.num_experts"
+    top_k_attr_name: str = "gate.top_k"
+    fused_experts: bool = False  # experts are wrapped as callables at runtime
+
+
 OBSERVER_CONFIG_REGISTRY = {
     "Qwen3MoeForCausalLM": Qwen3MoEObserverHookConfig,
     "NonUniformQwen3MoeForCausalLM": Qwen3MoEObserverHookConfig,
@@ -533,4 +543,5 @@ OBSERVER_CONFIG_REGISTRY = {
     "Ernie4_5_MoEForCausalLM": Ernie4_5MoEObserverHookConfig,
     "Ernie4_5_MoeForCausalLM": Ernie4_5MoEObserverHookConfig,
     "Glm4MoeForCausalLM": Glm44MoEObserverHookConfig,
+    "Qwen3_5MoeForConditionalGeneration": Qwen3_5MoEObserverHookConfig,
 }

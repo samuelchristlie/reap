@@ -115,12 +115,31 @@ MODEL_ATTRS = {
         "num_experts": "n_routed_experts",
         "num_experts_per_tok": "num_experts_per_tok",
     },
+    "Qwen3_5MoeForConditionalGeneration": {
+        "moe_block": "mlp",
+        "gate_proj": "gate_up_proj",
+        "up_proj": "gate_up_proj",
+        "down_proj": "down_proj",
+        "experts": "experts",
+        "fused": True,
+        "router": "gate",
+        "num_experts": "num_experts",
+        "num_experts_per_tok": "num_experts_per_tok",
+        # Multimodal wrapper: layers live under model.language_model.layers
+        # instead of the standard model.layers
+        "layers_path": "model.language_model.layers",
+    },
 }
 
 
 def get_moe(model, layer):
-    moe_attr_name = MODEL_ATTRS.get(model.__class__.__name__)["moe_block"]
-    return getattr(model.model.layers[layer], moe_attr_name)
+    attrs = MODEL_ATTRS.get(model.__class__.__name__)
+    moe_attr_name = attrs["moe_block"]
+    layers_path = attrs.get("layers_path", "model.layers")
+    obj = model
+    for part in layers_path.split("."):
+        obj = getattr(obj, part)
+    return getattr(obj[layer], moe_attr_name)
 
 
 def assert_merge(model, merged_moe, cluster_label):
@@ -194,6 +213,14 @@ def patched_model_map(model: str):
         patched = True
         model_name = "artifacts/models/Qwen3-Coder-480B-A35B-Instruct-FP8"
 
+    # Qwen3.5/3.6 – runtime patching only (no file-level patch needed)
+    if model.startswith("Qwen/Qwen3.6") or model.startswith("Qwen/Qwen3.5"):
+        patched = False  # loaded directly; patches applied at runtime
+        logger.info(
+            f"Qwen3.5/3.6 model detected ({model}). "
+            "Runtime patches will be applied after loading."
+        )
+
     if patched:
         logger.info(f"Using patched model for {model} from: {model_name}")
     return model_name
@@ -266,3 +293,49 @@ def register_llama_with_vllm():
     from vllm.model_executor.models import ModelRegistry
     print("Registering Llama4ForCausalLM with vLLM")
     ModelRegistry.register_model("Llama4ForCausalLM", "vllm.model_executor.models.llama4:Llama4ForCausalLM")
+
+
+def load_moe_model(model_name: str, **kwargs):
+    """Load a MoE model using the appropriate Auto class.
+
+    Detects whether the model is a multimodal (ForConditionalGeneration)
+    or text-only (ForCausalLM) architecture and uses the corresponding
+    Auto class.  For Qwen3.5/3.6 models, runtime patches are applied
+    automatically after loading.
+
+    Args:
+        model_name: HuggingFace model name or local path.
+        **kwargs: Forwarded to ``from_pretrained``.
+
+    Returns:
+        The loaded (and possibly patched) model.
+    """
+    from transformers import AutoConfig
+
+    trust = kwargs.get("trust_remote_code", True)
+    config = AutoConfig.from_pretrained(model_name, trust_remote_code=trust)
+    architectures = getattr(config, "architectures", [])
+
+    # Decide which Auto class to use
+    use_vision = any(
+        "ConditionalGeneration" in arch or "ImageTextToText" in arch
+        for arch in architectures
+    )
+
+    if use_vision:
+        from transformers import AutoModelForImageTextToText
+        auto_cls = AutoModelForImageTextToText
+    else:
+        from transformers import AutoModelForCausalLM
+        auto_cls = AutoModelForCausalLM
+
+    logger.info("Loading model %s via %s", model_name, auto_cls.__name__)
+    model = auto_cls.from_pretrained(model_name, **kwargs)
+
+    # Apply runtime patches for Qwen3.5/3.6
+    model_cls_name = model.__class__.__name__
+    if model_cls_name == "Qwen3_5MoeForConditionalGeneration":
+        from reap.models.qwen3_5_moe import patch_qwen3_5_moe_model
+        patch_qwen3_5_moe_model(model)
+
+    return model

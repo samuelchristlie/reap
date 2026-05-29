@@ -10,7 +10,7 @@ import yaml
 
 import torch
 from tqdm import tqdm
-from transformers import AutoTokenizer, AutoModelForCausalLM, HfArgumentParser
+from transformers import AutoTokenizer, HfArgumentParser
 
 from accelerate.utils import set_seed
 from accelerate.hooks import remove_hook_from_module
@@ -32,7 +32,7 @@ from reap.cluster import (
     hierarchical_clustering,
     dynamic_frequency_penalized_clustering,
 )
-from reap.model_util import get_moe, assert_merge, MODEL_ATTRS, patched_model_map, get_super_expert_indices
+from reap.model_util import get_moe, assert_merge, MODEL_ATTRS, patched_model_map, get_super_expert_indices, load_moe_model
 from reap.eval import run_evaluate
 import shutil
 
@@ -133,21 +133,35 @@ def prune(
                 )
             setattr(moe, model_attrs["router"], router)
         else:
-            # prune fused experts, only tested for llama-4
+            # prune fused experts (Llama-4, Qwen3.5/3.6)
             moe.experts.gate_up_proj.data = moe.experts.gate_up_proj[
                 retained_expert_indicies
             ]
             moe.experts.down_proj.data = moe.experts.down_proj[retained_expert_indicies]
             moe.num_experts = len(retained_expert_indicies)
-            moe.router.weight.data = moe.router.weight.data[retained_expert_indicies]
-            moe.router.out_features = len(retained_expert_indicies)
-            if hasattr(moe.router, "num_experts"):  # transformers >= 4.54+
-                moe.router.num_experts = len(retained_expert_indicies)
+            if hasattr(moe.experts, "num_experts"):
+                moe.experts.num_experts = len(retained_expert_indicies)
+            # Also update the underlying experts module if wrapped
+            if hasattr(moe.experts, "_original") and hasattr(moe.experts._original, "num_experts"):
+                moe.experts._original.num_experts = len(retained_expert_indicies)
+            # prune router (attribute name varies by architecture)
+            router = getattr(moe, model_attrs["router"])
+            router.weight.data = router.weight.data[retained_expert_indicies]
+            if hasattr(router, "out_features"):
+                router.out_features = len(retained_expert_indicies)
+            if hasattr(router, "num_experts"):  # transformers >= 4.54+
+                router.num_experts = len(retained_expert_indicies)
 
     # patch config and dump
     logger.info("Saving pruned model...")
     retained_experts = len(retained_expert_indicies)
     setattr(model.config, model_attrs["num_experts"], retained_experts)
+    # Handle nested configs (e.g., Qwen3.5/3.6 multimodal where num_experts
+    # lives inside config.text_config)
+    if hasattr(model.config, "text_config") and hasattr(
+        model.config.text_config, model_attrs["num_experts"]
+    ):
+        setattr(model.config.text_config, model_attrs["num_experts"], retained_experts)
     if model.__class__.__name__ == "Ernie4_5_MoeForCausalLM":  # remote-code verson
         model.config.moe_capacity = [
             retained_experts,
@@ -218,7 +232,7 @@ def main():
     model_name = patched_model_map(model_args.model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     # load model
-    model = AutoModelForCausalLM.from_pretrained(
+    model = load_moe_model(
         model_name,
         device_map="auto",
         torch_dtype="auto",
